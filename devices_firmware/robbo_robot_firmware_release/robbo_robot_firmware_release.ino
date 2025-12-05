@@ -95,31 +95,10 @@ struct Motor {
     byte directionPin;
     byte speedPin;
 
-    unsigned long lastPwmUpdateMs;
-
-    // Применение текущей скорости и направления к драйверу мотора.
-    // При нулевой скорости обе линии держим в HIGH, чтобы гарантированно
-    // не было ложного вращения при включении питания.
-    void applyPwm() {
-      if (currentSpeed == 0) {
-        digitalWrite(speedPin, HIGH);
-        digitalWrite(directionPin, HIGH);
-      } else {
-        if (direction == DIRECTION_FORWARD) {
-          analogWrite(speedPin, currentSpeed * 4);
-          analogWrite(directionPin, 0);
-        } else {
-          analogWrite(speedPin, 0);
-          analogWrite(directionPin, currentSpeed * 4);
-        }
-      }
-    }
-
     void initMotor(byte dPin, byte sPin) {
       direction = DIRECTION_FORWARD;
       currentSpeed = 0;
-      // По умолчанию цель скорости 0, чтобы при старте не было автоподхвата в updatePwm()
-      maxSpeed = 0;
+      maxSpeed = 32;
       stepsLimit = 0;
       PIDpath=0;
       PIDspeed=0;
@@ -128,20 +107,17 @@ struct Motor {
       directionPin = dPin;
       speedPin = sPin;
 
-      lastPwmUpdateMs = 0;
-
       pinMode(directionPin, OUTPUT);
       pinMode(speedPin, OUTPUT);
-
-      // Сразу зажимаем оба пина в HIGH, чтобы моторы были гарантированно выключены.
-      digitalWrite(speedPin, HIGH);
-      digitalWrite(directionPin, HIGH);
     }
 
     void stop() {
       currentSpeed = 0;
-      maxSpeed = 0;
-      applyPwm();
+      
+//      analogWrite(speedPin, 0);
+//      analogWrite(directionPin, 0);
+      digitalWrite(speedPin, HIGH);
+      digitalWrite(directionPin, HIGH);
    }
 
 
@@ -158,12 +134,22 @@ struct Motor {
     void setSpeedAndDirection(byte speed, byte dir) {
       direction = dir;
       maxSpeed = speed;
+      currentSpeed = maxSpeed;
 
       if(speed == 0){
-        currentSpeed = 0;
-        applyPwm();                // мгновенно останавливаем
+         digitalWrite(speedPin, HIGH);
+         digitalWrite(directionPin, HIGH);
       }
-      // Для ненулевой скорости не прыгаем сразу на maxSpeed — плавно выйдем в updatePwm().
+      else{
+         if (dir == 0) {
+           analogWrite(speedPin, currentSpeed * 4);
+           analogWrite(directionPin, 0);
+         }
+         else {
+           analogWrite(speedPin, 0);
+           analogWrite(directionPin, currentSpeed * 4);
+         }
+      }
     }
 
 
@@ -203,35 +189,6 @@ struct Motor {
       if (stepsDistance > 65535) {
         stepsDistance = 0;
       }
-    }
-
-    // Плавное изменение currentSpeed к maxSpeed и обновление выходов
-    void updatePwm() {
-      unsigned long now = millis();
-
-      const unsigned long accelIntervalMs = 10;  // интервал между изменениями скорости, мс
-      if (now - lastPwmUpdateMs < accelIntervalMs) {
-        return;
-      }
-      lastPwmUpdateMs = now;
-
-      if (currentSpeed == maxSpeed) {
-        return; // уже достигли целевой скорости
-      }
-
-      const byte accelStep = 1; // максимально изменяем скорость за шаг
-
-      if (currentSpeed < maxSpeed) {
-        byte delta = maxSpeed - currentSpeed;
-        if (delta > accelStep) delta = accelStep;
-        currentSpeed += delta;
-      } else { // currentSpeed > maxSpeed
-        byte delta = currentSpeed - maxSpeed;
-        if (delta > accelStep) delta = accelStep;
-        currentSpeed -= delta;
-      }
-
-      applyPwm();
     }
 
 };
@@ -855,9 +812,6 @@ void setup() {
 
   leftMotor.initMotor(10, 9);
   rightMotor.initMotor(6, 5);
-  // Явно останавливаем после инициализации, чтобы исключить любой стартовый рывок
-  leftMotor.stop();
-  rightMotor.stop();
 
   attachInterrupt(1, onLeftMotorStep,  CHANGE);
   attachInterrupt(0, onRightMotorStep, CHANGE);
@@ -1703,10 +1657,6 @@ else
   //   for(int f = 0; f < 5; f++){
   //      sensors[f] -> iteration();
   //   }
-
-  // Плавное обновление PWM моторов (мягкий старт/торможение)
-  leftMotor.updatePwm();
-  rightMotor.updatePwm();
 
 
   //   pinMode(11, OUTPUT);
