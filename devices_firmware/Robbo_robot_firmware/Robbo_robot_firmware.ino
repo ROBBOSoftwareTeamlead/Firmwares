@@ -1,5 +1,4 @@
 #define FIRMWARE_VERSION "00010"
-//toDO PIDpath обнулить при перполнении на обоих моторах
 
 #include <EEPROM.h>
 #include "Arduino.h"
@@ -10,6 +9,31 @@
 #define ADDRCALIB 1000
 #define BLUE_CHECK 500
 
+// Constants for motor control
+#define MAX_UINT16 65535
+#define PWM_MULTIPLIER 4
+#define DIRECTION_BIT_MASK 64
+
+// Constants for ultrasonic sensor
+#define SONIC_RESET_DELAY_US 30000
+#define SONIC_TIMEOUT_US 100000
+#define SONIC_PULSE_WIDTH_US 9
+#define SONIC_SPEED_OF_SOUND_CM_PER_US 0.034f
+#define SONIC_DISTANCE_OFFSET_CM 14
+
+// Constants for color sensor
+#define COLOR_SYNC_THRESHOLD_US 1540  // (110 * 14)
+#define COLOR_BIT_DIVISOR 14
+#define COLOR_ADAPTIVE_TRIES_MAX 25
+#define COLOR_ADAPTIVE_TRIES_MIN 5
+#define COLOR_CHANGE_THRESHOLD 32
+#define COLOR_STABILITY_THRESHOLD 5
+#define COLOR_LOOP_TIMEOUT_US 10000
+#define COLOR_INITIAL_INTERVAL_BIT 111
+
+// Constants for calibration
+#define CALIBRATION_DELAY_MS 800
+#define CALIBRATION_CHECK_INTERVAL_MS 200
 
 #define portOfPin(P)\
   (((P)>=0&&(P)<8)?&PORTD:(((P)>7&&(P)<14)?&PORTB:&PORTC))
@@ -29,15 +53,7 @@
 #define isLow(P)((*(pinOfPin(P))& pinMask(P))==0)
 #define digitalState(P)((uint8_t)isHigh(P))
 
-
-
-
-
-
-
 #define CONNECTION_LOST_TIME_INTERVAL 2000
-
-
 
 #define SENSOR_TYPE_NONE 0
 #define SENSOR_TYPE_LINE 1
@@ -48,24 +64,16 @@
 #define SENSOR_TYPE_ULTRASONIC 6
 #define SENSOR_TYPE_COLOR 7
 
-
 #define DIGITAL_PIN_1 4
 #define DIGITAL_PIN_2 7
 #define DIGITAL_PIN_3 8
 #define DIGITAL_PIN_4 11
 #define DIGITAL_PIN_5 12
 
-
-
 ServoTimer2 myservo;
 
-
-
 #define SENSOR_COUNT 5
-
 #define SENSOR_RESPONSE_LENGTH 4
-
-
 
 char blue_num;
 const byte MOTOR_STATE_DISABLED = 0;
@@ -73,13 +81,7 @@ const byte MOTOR_STATE_ENABLED = 1;
 const byte MOTOR_STATE_STEPS_LIMIT = 2;
 
 const byte DIRECTION_FORWARD = 0;
-const byte DIRECTION_BACKWARD = 0xFF;
-
-
-
-
-
-
+const byte DIRECTION_BACKWARD = 1;
 
 struct Motor {
   public:
@@ -106,11 +108,11 @@ struct Motor {
         digitalWrite(directionPin, HIGH);
       } else {
         if (direction == DIRECTION_FORWARD) {
-          analogWrite(speedPin, currentSpeed * 4);
+          analogWrite(speedPin, currentSpeed * PWM_MULTIPLIER);
           analogWrite(directionPin, 0);
         } else {
           analogWrite(speedPin, 0);
-          analogWrite(directionPin, currentSpeed * 4);
+          analogWrite(directionPin, currentSpeed * PWM_MULTIPLIER);
         }
       }
     }
@@ -189,18 +191,19 @@ struct Motor {
       }
 
 
-      if (stepsCnt > 65535) {
+      // Handle overflow for 16-bit counters
+      if (stepsCnt > MAX_UINT16) {
         stepsCnt = 0;
       }
-      if (stepsPath > 65535) {
+      if (stepsPath > MAX_UINT16) {
         stepsPath = 0;
       }
       
-      if (PIDpath > 65535) {
+      if (PIDpath > MAX_UINT16) {
         PIDpath = 0;
       }
 
-      if (stepsDistance > 65535) {
+      if (stepsDistance > MAX_UINT16) {
         stepsDistance = 0;
       }
     }
@@ -238,11 +241,11 @@ struct Motor {
 
 
 
-float calibraterdl = 1 ;                                                 //my 
-float calibrateldr = 1 ;
-unsigned int lastENCl=0;
-unsigned int lastENCr=0;
-byte ENCdel=1;
+float calibrationRightToLeft = 1.0f;
+float calibrationLeftToRight = 1.0f;
+unsigned int lastEncoderLeft = 0;
+unsigned int lastEncoderRight = 0;
+byte encoderDelta = 1;
 byte commandState;
 const byte COMMAND_STATE_WAITING_COMMAND = 0;
 const byte COMMAND_STATE_WAITING_COMMAND_TYPE = 1;
@@ -251,7 +254,7 @@ const byte COMMAND_STATE_WAITING_CRC = 3;
 const byte COMMAND_STATE_EXECUTING = 4;
 
 byte commandType;
-byte flag=0;
+byte motorControlFlag = 0;
 
 Motor leftMotor;
 Motor rightMotor;
@@ -274,26 +277,24 @@ float m_lastResult = 0;
 
 
 
+// Common function to handle motor step limit reached
+void handleMotorStepLimit(Motor& motor, Motor& otherMotor) {
+  if ((motor.stepsLimit > 0) && (motor.stepsCnt >= motor.stepsLimit)) {
+    motor.stepsLimit = 0;
+    motor.stop();
+    otherMotor.stepsLimit = 0;
+    otherMotor.stop();
+  }
+}
+
 void onLeftMotorStep() {
   leftMotor.onStep();
-  if ((leftMotor.stepsLimit > 0) && (leftMotor.stepsCnt >= leftMotor.stepsLimit)) {
-    leftMotor.stepsLimit = 0;
-    leftMotor.stop();
-      rightMotor.stepsLimit = 0;
-      rightMotor.stop();
-  }
+  handleMotorStepLimit(leftMotor, rightMotor);
 }
 
 void onRightMotorStep() {
   rightMotor.onStep();
-  if ((rightMotor.stepsLimit > 0) && ( rightMotor.stepsCnt >= rightMotor.stepsLimit)) {
-    rightMotor.stepsLimit = 0;
-    rightMotor.stop();
-      leftMotor.stepsLimit = 0;
-      leftMotor.stop();
-
-  }
-
+  handleMotorStepLimit(rightMotor, leftMotor);
 }
 
 
@@ -312,64 +313,72 @@ int MODEL_ID;
 void parseSerialNumber() {
   EEPROM.get(SERIAL_ADDRESS, chararrSerialRaw);
 
+  const int maxSerialLength = sizeof(chararrSerialRaw) - 1;
+  const int maxModelLength = sizeof(chararrModel) - 1;
+  const int maxVersionLength = sizeof(chararrVersion) - 1;
+  const int maxPartLength = sizeof(chararrPart) - 1;
+  const int maxSerialNumLength = sizeof(chararrSerial) - 1;
 
   int iPointer = 0;
-  while (chararrSerialRaw[iPointer] != '-') {
+  // Find first delimiter
+  while (iPointer < maxSerialLength && chararrSerialRaw[iPointer] != '-' && chararrSerialRaw[iPointer] != 0) {
     iPointer++;
   }
+  if (iPointer >= maxSerialLength) return;
   iPointer++;
 
+  // Parse model
   int iModelOffset = 0;
-  while (chararrSerialRaw[iPointer] != '-') {
+  while (iPointer < maxSerialLength && chararrSerialRaw[iPointer] != '-' && chararrSerialRaw[iPointer] != 0 && iModelOffset < maxModelLength) {
     chararrModel[iModelOffset] = chararrSerialRaw[iPointer];
     iModelOffset++;
     iPointer++;
   }
+  chararrModel[iModelOffset] = 0;
+  if (iPointer >= maxSerialLength) return;
   iPointer++;
 
+  // Parse version
   int iVersionOffset = 0;
-  while (chararrSerialRaw[iPointer] != '-') {
+  while (iPointer < maxSerialLength && chararrSerialRaw[iPointer] != '-' && chararrSerialRaw[iPointer] != 0 && iVersionOffset < maxVersionLength) {
     chararrVersion[iVersionOffset] = chararrSerialRaw[iPointer];
     iVersionOffset++;
     iPointer++;
   }
-
+  chararrVersion[iVersionOffset] = 0;
+  if (iPointer >= maxSerialLength) return;
   iPointer++;
 
+  // Parse part
   int iPartOffset = 0;
-  while (chararrSerialRaw[iPointer] != '-') {
+  while (iPointer < maxSerialLength && chararrSerialRaw[iPointer] != '-' && chararrSerialRaw[iPointer] != 0 && iPartOffset < maxPartLength) {
     chararrPart[iPartOffset] = chararrSerialRaw[iPointer];
     iPartOffset++;
     iPointer++;
   }
-
+  chararrPart[iPartOffset] = 0;
+  if (iPointer >= maxSerialLength) return;
   iPointer++;
 
-
+  // Parse serial number
   int iSerialOffset = 0;
-  while (chararrSerialRaw[iPointer] != 0 && (chararrSerialRaw[iPointer] >= '0' && chararrSerialRaw[iPointer] <= '9')) {
+  while (iPointer < maxSerialLength && chararrSerialRaw[iPointer] != 0 && 
+         (chararrSerialRaw[iPointer] >= '0' && chararrSerialRaw[iPointer] <= '9') && 
+         iSerialOffset < maxSerialNumLength) {
     chararrSerial[iSerialOffset] = chararrSerialRaw[iPointer];
     iSerialOffset++;
     iPointer++;
   }
+  chararrSerial[iSerialOffset] = 0;
 
 
-  if (strcmp(chararrModel, "R") == 0
-      && strcmp(chararrVersion, "1") == 0
-      /* && (strcmp(chararrPart, "1") == 0 || strcmp(chararrPart, "2") == 0 || strcmp(chararrPart, "3") == 0 || strcmp(chararrPart, "4") == 0 || strcmp(chararrPart, "5") == 0) */) {
-
+  if (strcmp(chararrModel, "R") == 0 && strcmp(chararrVersion, "1") == 0) {
     MODEL_ID = 0;
   }
-  else if (strcmp(chararrModel, "L") == 0
-           && strcmp(chararrVersion, "1") == 0
-           /* && strcmp(chararrPart, "1") == 0 */ ) {
-
+  else if (strcmp(chararrModel, "L") == 0 && strcmp(chararrVersion, "1") == 0) {
     MODEL_ID = 1;
   }
-  else if (strcmp(chararrModel, "L") == 0
-           && strcmp(chararrVersion, "3") == 0
-           /* && (strcmp(chararrPart, "1") == 0 || strcmp(chararrPart, "2") == 0 || strcmp(chararrPart, "3") == 0) */ ) {
-
+  else if (strcmp(chararrModel, "L") == 0 && strcmp(chararrVersion, "3") == 0) {
     MODEL_ID = 2;
   }
   else {
@@ -380,9 +389,6 @@ void parseSerialNumber() {
 
 
 byte byteActiveColorSensor = 0;
-
-
-//boolean time = false;
 
 class ISensor {
   public:
@@ -472,7 +478,7 @@ class AnalogSensor: public ISensor {
 
 class SonicSensor: public ISensor {
     boolean resetMode = true;
-    boolean measuremnetWaiting;
+    boolean measurementWaiting;
     unsigned long time;
     int result = 0;
     int pin;
@@ -481,9 +487,6 @@ class SonicSensor: public ISensor {
 
    #define SONIC_FILTER_LENGTH 9
    int history[SONIC_FILTER_LENGTH] = {};
-   int history_[SONIC_FILTER_LENGTH] = {};
-
-//   unsigned long lLastTimeRun  = millis();
 
   public:
     SonicSensor(int pin) {
@@ -503,79 +506,73 @@ class SonicSensor: public ISensor {
 
 
     void reset() {
-//      if(abs(millis() - lLastTimeRun) < 5000) return;
-//      lLastTimeRun = millis();
-      
-      measuremnetWaiting = false;
+      measurementWaiting = false;
       resetMode = true;
       bReady = false;
       time = micros();
     }
 
     void iteration(byte data, byte data2) {
-      //reset mode with delay
+      // Reset mode with delay
       if (resetMode) {
-        if (micros() - time > 30000) {
+        if (micros() - time > SONIC_RESET_DELAY_US) {
           pinAsOutput(pin);
           digitalWrite(pin, HIGH);
-          delayMicroseconds(9);
+          delayMicroseconds(SONIC_PULSE_WIDTH_US);
           digitalWrite(pin, LOW);
           pinAsInput(pin);
           time = micros();
           resetMode = false;
         }
-
         return;
       }
 
-
-      // no response
-      // we lost the impulse
-      if (micros() - time > 100000) {
+      // Timeout - no response received
+      if (micros() - time > SONIC_TIMEOUT_US) {
         bReady = true;
         return;
       }
 
-
-      if (measuremnetWaiting) {
+      if (measurementWaiting) {
         if (LOW == digitalState(pin)) {
-          result = ((micros() - time) *  34000) / 2000000 - 14;
+          // Calculate distance: (time * speed_of_sound) / 2 - offset
+          unsigned long pulseTime = micros() - time;
+          result = (int)((pulseTime * SONIC_SPEED_OF_SOUND_CM_PER_US) / 2.0f - SONIC_DISTANCE_OFFSET_CM);
           if (result < 0) {
             result = 0;
           }
 
+          // Shift history buffer
           for(int i = 1; i < SONIC_FILTER_LENGTH; i++){
             history[i - 1] = history[i];
           }
           history[SONIC_FILTER_LENGTH - 1] = result;
 
-
+          // Find median using partial sort (more efficient than full bubble sort)
+          int sorted[SONIC_FILTER_LENGTH];
           for(int i = 0; i < SONIC_FILTER_LENGTH; i++){
-            history_[i] = history[i];
+            sorted[i] = history[i];
           }
           
-
-
-          for(int i = 0; i < SONIC_FILTER_LENGTH; i++){
-             for(int j = i + 1; j < SONIC_FILTER_LENGTH; j++){
-               if(history_[i] < history_[j]){
-                  int iTemp = history_[i];
-                  history_[i] = history_[j];
-                  history_[j] = iTemp;
-               }
-             }
+          // Simple insertion sort for small array (more efficient than bubble sort)
+          for(int i = 1; i < SONIC_FILTER_LENGTH; i++){
+            int key = sorted[i];
+            int j = i - 1;
+            while(j >= 0 && sorted[j] > key){
+              sorted[j + 1] = sorted[j];
+              j--;
+            }
+            sorted[j + 1] = key;
           }
 
-
-          result = history_[4];
-          
-          
+          // Use median value (middle element)
+          result = sorted[SONIC_FILTER_LENGTH / 2];
           bReady = true;
         }
       }
       else {
         if (digitalState(pin) == HIGH) {
-          measuremnetWaiting = true;
+          measurementWaiting = true;
         }
       }
     }
@@ -616,10 +613,10 @@ class ColorSensor: public ISensor {
    unsigned long timeHighEnd = 0;
 
    unsigned long timeSync = 0;
-    int INTERVAL_BIT_ALL=0;
-    int INTERVAL_BIT_NEW=0;
-    byte TRIES=0;
-   boolean flag2=0;
+    int INTERVAL_BIT_ALL = 0;
+    int INTERVAL_BIT_NEW = 0;
+    byte TRIES = 0;
+   boolean adaptiveCalibrationEnabled = false;
    byte byteCounter = 0;
    byte bitCounter = 0;
    byte result[3] = {0, 0, 0};
@@ -635,21 +632,20 @@ class ColorSensor: public ISensor {
     ColorSensor(int pin) {
       this -> pin = pin;
       pinAsInput(pin);
-      INTERVAL_BIT  = 111;
-      INTERVAL_BYTE = 111*8;
+      INTERVAL_BIT  = COLOR_INITIAL_INTERVAL_BIT;
+      INTERVAL_BYTE = COLOR_INITIAL_INTERVAL_BIT * 8;
     };
-    void  debugSetValue(byte value){
-
-     
     
-   }
+    void debugSetValue(byte value) {
+      // Debug function - currently unused
+    }
 
     byte getType() {
       return SENSOR_TYPE_COLOR;
     };
 
 
-void reset() {
+    void reset() {
       booleanReady = false;
       timeLowStart = 0;
       timeLowEnd = 0;
@@ -658,26 +654,23 @@ void reset() {
       timeSync = 0;
       byteCounter = 0;
       bitCounter = 0;
-      //      result[0] = 0;
-      //      result[1] = 0;
-      //      result[2] = 0;
       _result[0] = 0;
       _result[1] = 0;
       _result[2] = 0;
       iSynchronized = 0;
-     if(TRIES<25&&flag2){
-             TRIES++;
-             if(TRIES>5){
-      INTERVAL_BIT_ALL+=INTERVAL_BIT_NEW;
-      INTERVAL_BIT=round(INTERVAL_BIT_ALL/(TRIES-5));
-      INTERVAL_BYTE=INTERVAL_BIT*8;
-    //  Serial.println(INTERVAL_BIT_ALL);
-    //       Serial.println(TRIES); 
-     // Serial.println(INTERVAL_BIT);
-             }
+      
+      // Adaptive calibration of bit interval
+      if(TRIES < COLOR_ADAPTIVE_TRIES_MAX && adaptiveCalibrationEnabled){
+        TRIES++;
+        if(TRIES > COLOR_ADAPTIVE_TRIES_MIN){
+          INTERVAL_BIT_ALL += INTERVAL_BIT_NEW;
+          INTERVAL_BIT = round(INTERVAL_BIT_ALL / (TRIES - COLOR_ADAPTIVE_TRIES_MIN));
+          INTERVAL_BYTE = INTERVAL_BIT * 8;
+        }
       }
-      else
-      flag2=1;
+      else {
+        adaptiveCalibrationEnabled = true;
+      }
     }
 
     void iteration(byte data, byte data2) {
@@ -695,7 +688,7 @@ void reset() {
         case 1: {
             if (digitalState(pin) == LOW) {
               timeLowEnd = micros();
-              if (timeLowEnd - timeLowStart >= (110)*14) {
+              if (timeLowEnd - timeLowStart >= COLOR_SYNC_THRESHOLD_US) {
                 iSynchronized = 2;
               }
             }
@@ -705,9 +698,8 @@ void reset() {
             break;
           }
         case 2: {
-               if (digitalState(pin) == HIGH) {
-      //                Serial.println(timeLowEnd - timeLowStart);
-       timeHighStart = micros();
+            if (digitalState(pin) == HIGH) {
+              timeHighStart = micros();
               iSynchronized = 3;
             }
             else {
@@ -716,9 +708,8 @@ void reset() {
             break;
           }
         case 3: {
-          INTERVAL_BIT_NEW=round((timeLowEnd-timeLowStart)/14);//mb +114*2/16
-          timeSync=timeLowEnd+INTERVAL_BIT+50;
-   //       Serial.println(INTERVAL_BIT);
+          INTERVAL_BIT_NEW = round((timeLowEnd - timeLowStart) / COLOR_BIT_DIVISOR);
+          timeSync = timeLowEnd + INTERVAL_BIT + 50;
           iSynchronized = 4;
           }
         case 4: {
@@ -735,21 +726,25 @@ void reset() {
                 bitCounter = 0;
                 byteCounter++;
                 if (byteCounter > 2) {
-                  //We done
+                  // Reading complete - validate and update result
                   byteCounter = 0;
-                  iSynchronized = 0;                     
-                  if(abs(result[0] - _result[0]) >= 32 && abs(result[1] - _result[1]) < 5 && abs(result[2] - _result[2]) < 5
-                          || abs(result[0] - _result[0]) < 5 && abs(result[1] - _result[1]) >= 32 && abs(result[2] - _result[2]) < 5
-                          || abs(result[0] - _result[0]) < 5 && abs(result[1] - _result[1]) < 5 && abs(result[2] - _result[2]) >= 32){
-
-                          }
-                          else
-                          {
-                           
-                  result[0] = _result[0];
-                  result[1] = _result[1];
-                  result[2] = _result[2];
+                  iSynchronized = 0;
                   
+                  // Filter out readings with large single-channel changes (likely noise)
+                  bool hasLargeChange = (abs(result[0] - _result[0]) >= COLOR_CHANGE_THRESHOLD && 
+                                        abs(result[1] - _result[1]) < COLOR_STABILITY_THRESHOLD && 
+                                        abs(result[2] - _result[2]) < COLOR_STABILITY_THRESHOLD) ||
+                                       (abs(result[0] - _result[0]) < COLOR_STABILITY_THRESHOLD && 
+                                        abs(result[1] - _result[1]) >= COLOR_CHANGE_THRESHOLD && 
+                                        abs(result[2] - _result[2]) < COLOR_STABILITY_THRESHOLD) ||
+                                       (abs(result[0] - _result[0]) < COLOR_STABILITY_THRESHOLD && 
+                                        abs(result[1] - _result[1]) < COLOR_STABILITY_THRESHOLD && 
+                                        abs(result[2] - _result[2]) >= COLOR_CHANGE_THRESHOLD);
+                  
+                  if (!hasLargeChange) {
+                    result[0] = _result[0];
+                    result[1] = _result[1];
+                    result[2] = _result[2];
                   }
                   booleanReady = true;
                 }
@@ -761,15 +756,6 @@ void reset() {
     }
 
     boolean isReady() {
-
-      /*if (  (result[0] == 0) && (result[1] == 0) && (result[2] == 0 ) ) {
-              booleanReady = false; 
-        
-      }else{
-           booleanReady = true;
-        
-      }*/
-      
       return booleanReady;
     }
 
@@ -783,56 +769,31 @@ void reset() {
 
 ISensor* sensors[5];
 
+#ifdef TESTMODE_COLOR_SENSOR
+boolean testModeToggle = false;
+#endif
 
-
-boolean fuck = false;
-
-
-//void iterator(){
-//
-////   for(int f = 0; f < 5; f++){
-////      sensors[f] -> iteration();
-////   }
-//
-//
-///*
-//   pinMode(11, OUTPUT);
-//   if(fuck){
-//      digitalWrite(11, HIGH);
-//      fuck = false;
-//   }
-//   else{
-//      digitalWrite(11, LOW);
-//      fuck = true;
-//   }
-//*/
-//}
-void calibrating()
-{
+void calibrating() {
+  // Read encoders and calculate calibration coefficients
+  delay(CALIBRATION_DELAY_MS);
   
-    //считываем энкодеры
-   delay(800);
-    while(ENCdel>0)                                                 //my
-    {
-      delay(200);
-      ENCdel=leftMotor.stepsPath-lastENCl+rightMotor.stepsPath-lastENCr;
-      lastENCl=leftMotor.stepsPath;
-      lastENCr=rightMotor.stepsPath;
-    }
-    
-    if(leftMotor.stepsPath>rightMotor.stepsPath)
-    {
-      calibrateldr=1;
-      calibraterdl = (float) rightMotor.stepsPath / (float)leftMotor.stepsPath;
-      EEPROM.put(ADDRCALIB,calibraterdl);
-    }
-    else
-    {
-      calibraterdl=1;
-      calibrateldr = (float)leftMotor.stepsPath / (float)rightMotor.stepsPath;
-       EEPROM.put(ADDRCALIB,calibrateldr*(-1));
-    }
-    
+  while(encoderDelta > 0) {
+    delay(CALIBRATION_CHECK_INTERVAL_MS);
+    encoderDelta = leftMotor.stepsPath - lastEncoderLeft + rightMotor.stepsPath - lastEncoderRight;
+    lastEncoderLeft = leftMotor.stepsPath;
+    lastEncoderRight = rightMotor.stepsPath;
+  }
+  
+  if(leftMotor.stepsPath > rightMotor.stepsPath) {
+    calibrationLeftToRight = 1.0f;
+    calibrationRightToLeft = (float)rightMotor.stepsPath / (float)leftMotor.stepsPath;
+    EEPROM.put(ADDRCALIB, calibrationRightToLeft);
+  }
+  else {
+    calibrationRightToLeft = 1.0f;
+    calibrationLeftToRight = (float)leftMotor.stepsPath / (float)rightMotor.stepsPath;
+    EEPROM.put(ADDRCALIB, calibrationLeftToRight * (-1));
+  }
 }
 
 
@@ -861,21 +822,10 @@ void setup() {
 
   attachInterrupt(1, onLeftMotorStep,  CHANGE);
   attachInterrupt(0, onRightMotorStep, CHANGE);
-    m_lastInput = 0;
-    m_lastResult = 0;
-    float calib;
-  /*  EEPROM.get(ADDRCALIB,calib);
-    if(calib>0)
-   {
-    calibraterdl=calib;
-    calibrateldr=1;
-    }
-    else
-    {
-      calibraterdl-1;
-      calibrateldr=-calib;
-    }
-//    calibrating();*/
+  
+  m_lastInput = 0;
+  m_lastResult = 0;
+  
   EEPROM.get(BLUE_CHECK, blue_num);
     if(!blue_num)
   {
@@ -916,71 +866,14 @@ void setup() {
 
 
   
-  sensors[0]  = new AnalogSensor(A1, SENSOR_TYPE_LINE);
-  //   sensors[0]  = new ColorSensor(DIGITAL_PIN_1);
-  sensors[1]  = new AnalogSensor(A2, SENSOR_TYPE_LINE);
-  sensors[2]  = new AnalogSensor(A3, SENSOR_TYPE_LINE);
-  sensors[3]  = new AnalogSensor(A4, SENSOR_TYPE_LINE);
-  sensors[4]  = new AnalogSensor(A5, SENSOR_TYPE_LINE);
-
-
+  sensors[0] = new AnalogSensor(A1, SENSOR_TYPE_LINE);
+  sensors[1] = new AnalogSensor(A2, SENSOR_TYPE_LINE);
+  sensors[2] = new AnalogSensor(A3, SENSOR_TYPE_LINE);
+  sensors[3] = new AnalogSensor(A4, SENSOR_TYPE_LINE);
+  sensors[4] = new AnalogSensor(A5, SENSOR_TYPE_LINE);
 }
-//float last_input=0;
-/*float kli = 5;//5
-float kii=  0.995;//0.5
-float diff=5;
-void update_power_using_PID(byte leftSpeed, byte rightSpeed,float input ){
- float corrector_koef = 0; 
- int leftSpeedCorrected ;
- int rightSpeedCorrected;
-        leftSpeedCorrected = leftSpeed + input*input*((input>0)+(input<0)*(-1))+kli*last_input+(input-last_input)*diff;//5
-        rightSpeedCorrected= rightSpeed-input*input*((input>0)+(input<0)*(-1))-kli*last_input-(input-last_input)*diff;
-        if(leftSpeedCorrected >63)
-        {
-        rightSpeedCorrected-=(leftSpeedCorrected-63);
-        leftSpeedCorrected =63;
-        }
-        if(rightSpeedCorrected >63)
-        {
-          leftSpeedCorrected-=(rightSpeedCorrected-63);
-          rightSpeedCorrected =63;
-        }
-        if(leftSpeedCorrected <0)
-        leftSpeedCorrected =0;
-        if(rightSpeedCorrected <0)
-        rightSpeedCorrected =0;
-       leftMotor.setSpeedAndDirection((byte)leftSpeedCorrected,    globalLeftDir);
-       rightMotor.setSpeedAndDirection((byte)rightSpeedCorrected,  globalRightDir);
-       if(kii!=1)
-        last_input=last_input*kii+input;//0.5
-       else
-       last_input=0;
-}*/
-
 
 void printSensors() {
-
-
-/*
-  //Looking for UltraSonic in progress
-  boolean pendingSensors[5] = {false, false, false, false, false};
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    byte byteType = sensors[i] -> getType();
-    if (byteType == SENSOR_TYPE_ULTRASONIC) {
-      SonicSensor sonicSensor = sensors[i];
-      if (sonicSensor.isReady()) {
-        //This one is ok
-      }
-      else {
-        pendingSensors[i] = true;
-      }
-    }
-  }
-*/
-
-
-
-
   Serial.write('#');
   Serial.write( (byte)((leftMotor.stepsCnt >> 8) & 0xff));
   Serial.write( (byte)((leftMotor.stepsCnt) & 0xff));
@@ -1064,11 +957,9 @@ void printSensors() {
   }
 
 
-  //byteActiveColorSensor
-
   tmp = 0;
-
   unsigned long timeLimit = micros();
+  
   while (totalColor > 0) {
     boolean allDone = true;
 
@@ -1080,35 +971,19 @@ void printSensors() {
           continue;
         }
 
-         unsigned long color_loop_breaker = micros();
-         unsigned long color_loop_checker = micros();
-
+        unsigned long colorLoopStart = micros();
         while (!sensors[i] -> isReady()) {
           sensors[i] -> iteration(i, totalColor);
           
-          color_loop_checker = micros();
-
-          if (( color_loop_checker - color_loop_breaker) > 1000 * 10){
-
-             break;
-          }
-          
-
-         /* byte * color_result_buf =  sensors[i]->getResult();
-         if ( (color_result_buf[1] == 0) && (color_result_buf[2] == 0) && (color_result_buf[3] == 0 ) ) {
+          if ((micros() - colorLoopStart) > COLOR_LOOP_TIMEOUT_US) {
             break;
-        
-          } */
-          
+          }
         }
-
         break;
       }
     }
 
-    //Finished
-    //      if(allDone || abs(micros() - timeLimit) > INTERVAL_BYTE * 10) break;
-    if (allDone || abs(micros() - timeLimit) > 1000 * 10) break;
+    if (allDone || abs(micros() - timeLimit) > COLOR_LOOP_TIMEOUT_US) break;
   }
  #ifdef TESTMODE_COLOR_SENSOR
       digitalLow(11);
@@ -1120,7 +995,7 @@ void printSensors() {
   }
 
 
-  //sonic
+  // Ultrasonic sensors
   for (int i = 0; i < SENSOR_COUNT; i++) {
     byte byteType = sensors[i] -> getType();
     if (byteType == SENSOR_TYPE_ULTRASONIC) {
@@ -1129,25 +1004,6 @@ void printSensors() {
       }
     }
   }
-
-
-  //   while(true){
-  //      boolean allDone = true;
-  //      for(int i = 0; i < SENSOR_COUNT; i++){
-  //         byte byteType = sensors[i] -> getType();
-  //         if(byteType == SENSOR_TYPE_ULTRASONIC){
-  //            if(sensors[i] -> isReady()){
-  //            }
-  //            else{
-  //               allDone = false;
-  //               sensors[i] -> iteration(0, 0);
-  //            }
-  //         }
-  //      }
-  //
-  //      //Finished
-  //      if(allDone) break;
-  //   }
 }
 
 
@@ -1167,16 +1023,6 @@ void printSensorDebug() {
                + "]");
 }
 
-
-
-//void update_speed_using_PID(byte leftPower, byte rightPower){
-//
-//
-//float power_proportion;
-//      
-//  
-//}
-
 byte bytearrayData[20];
 byte byteDataTail = 0;
 byte command = 0;
@@ -1188,29 +1034,6 @@ void loop() {
     leftMotor.stop();
     rightMotor.stop();
   }
-  /*  float e = 0; //невязка
-    unsigned int stepsPathDelta = 0;
-    if (leftMotor.PIDpath > (unsigned int)((float)rightMotor.PIDpath)*speed_proportion ){
-       stepsPathDelta = leftMotor.PIDpath - (unsigned int)((float)rightMotor.PIDpath)*speed_proportion;
-    }else{
-           stepsPathDelta = (unsigned int)((float)rightMotor.PIDpath)*speed_proportion -  leftMotor.PIDpath;
-    }
-  if (/* ( stepsPathDelta >1 ) && *//*(leftMotor.stepsPath > 0) && (rightMotor.stepsPath > 0) && (globalLeftMotorSpeed > 0) && (globalRightMotorSpeed > 0)&&(flag==0) )
-  {          
-       // steps_proportion =  steps_proportion.div(Fixed::fromInt(leftMotor.stepsPath),Fixed::fromInt(rightMotor.stepsPath));
-           //   e = steps_proportion - speed_proportion; //вычисляем невязку
-          e= ((float)rightMotor.PIDpath)*speed_proportion - (float)leftMotor.PIDpath;// 
-                 update_power_using_PID(leftMotor.PIDspeed,rightMotor.PIDspeed,e);
-
-}
-else
-{
-  if(flag==2)
-{
-  leftMotor.stop();
-  rightMotor.stop();
-}
-}*/
 
   if (Serial.available()) {
 
@@ -1408,32 +1231,26 @@ else
           case 'c': {
               byte leftSpeed = bytearrayData[0];
               byte rightSpeed = bytearrayData[1];
-              flag=0;
+              motorControlFlag = 0;
               byte leftDir = DIRECTION_FORWARD;
               byte rightDir = DIRECTION_FORWARD;
 
-              if ( leftSpeed >= 64) {
+              if (leftSpeed >= DIRECTION_BIT_MASK) {
                 leftDir = DIRECTION_BACKWARD;
-                leftSpeed -= 64;
+                leftSpeed -= DIRECTION_BIT_MASK;
               }
-              if ( rightSpeed >= 64) {
+              if (rightSpeed >= DIRECTION_BIT_MASK) {
                 rightDir = DIRECTION_BACKWARD;
-                rightSpeed -= 64;
+                rightSpeed -= DIRECTION_BIT_MASK;
               }
-              // speed_proportion = ((float)leftSpeed / (float) rightSpeed) * calibraterdl / calibrateldr;
-               globalLeftMotorSpeed = leftSpeed;
-               globalRightMotorSpeed = rightSpeed;
-               globalLeftDir = leftDir;
-               globalRightDir = rightDir;
-             //  leftMotor.PIDspeed=leftSpeed;
-             //  rightMotor.PIDspeed=rightSpeed;
-             // if((leftSpeed==0)&&(rightSpeed==0))//проверка на обнуление ПИД путей
-             // {
-             // leftMotor.PIDpath=0;
-              //rightMotor.PIDpath=0;
-              //}
-              leftMotor.setSpeedAndDirection(leftSpeed, leftDir);///
-              rightMotor.setSpeedAndDirection(rightSpeed, rightDir);//
+              
+              globalLeftMotorSpeed = leftSpeed;
+              globalRightMotorSpeed = rightSpeed;
+              globalLeftDir = leftDir;
+              globalRightDir = rightDir;
+              
+              leftMotor.setSpeedAndDirection(leftSpeed, leftDir);
+              rightMotor.setSpeedAndDirection(rightSpeed, rightDir);
               printSensors();
               break;
             }
@@ -1444,13 +1261,13 @@ else
               byte leftDir = DIRECTION_FORWARD;
               byte rightDir = DIRECTION_FORWARD;
 
-              if ( leftSpeed >= 64) {
+              if (leftSpeed >= DIRECTION_BIT_MASK) {
                 leftDir = DIRECTION_BACKWARD;
-                leftSpeed -= 64;
+                leftSpeed -= DIRECTION_BIT_MASK;
               }
-              if ( rightSpeed >= 64) {
+              if (rightSpeed >= DIRECTION_BIT_MASK) {
                 rightDir = DIRECTION_BACKWARD;
-                rightSpeed -= 64;
+                rightSpeed -= DIRECTION_BIT_MASK;
               }
 
               leftMotor.setSpeedAndDirection(leftSpeed, leftDir);
@@ -1489,33 +1306,26 @@ else
               byte stepsLow = bytearrayData[3];
               byte leftDir = DIRECTION_FORWARD;
               byte rightDir = DIRECTION_FORWARD;
-              flag=0;
-            //  leftMotor.PIDpath=0;
-             // rightMotor.PIDpath=0;
-              if ( leftSpeed >= 64) {
-                leftDir = DIRECTION_BACKWARD;
-                leftSpeed -= 64;
-              }
-              if ( rightSpeed >= 64) {
-                rightDir = DIRECTION_BACKWARD;
-                rightSpeed -= 64;
-              }
-              //if(leftSpeed!=rightSpeed)
+              motorControlFlag = 0;
               
-             // if(leftSpeed==rightSpeed)
-            //  kii=0.92 -(63-leftSpeed)*0.02;
-             // else
-            //  {kii=1;flag=1;}
+              if (leftSpeed >= DIRECTION_BIT_MASK) {
+                leftDir = DIRECTION_BACKWARD;
+                leftSpeed -= DIRECTION_BIT_MASK;
+              }
+              if (rightSpeed >= DIRECTION_BIT_MASK) {
+                rightDir = DIRECTION_BACKWARD;
+                rightSpeed -= DIRECTION_BIT_MASK;
+              }
+              
               unsigned int iStepsLimit = stepsHigh;
               iStepsLimit = iStepsLimit << 8;
               iStepsLimit += stepsLow;
-             // speed_proportion = (float)leftSpeed / (float) rightSpeed*calibraterdl/calibrateldr;//соотношение скоростей и путей соответственно
+              
               globalLeftDir = leftDir;
               globalRightDir = rightDir;
-              globalLeftMotorSpeed=leftSpeed;
-              globalRightMotorSpeed=rightSpeed;
-             // leftMotor.PIDspeed=leftSpeed;
-             // rightMotor.PIDspeed=rightSpeed;
+              globalLeftMotorSpeed = leftSpeed;
+              globalRightMotorSpeed = rightSpeed;
+              
               leftMotor.setSpeedAndDirection(leftSpeed, leftDir);
               rightMotor.setSpeedAndDirection(rightSpeed, rightDir);
               leftMotor.enableAndSetStepsLimit(iStepsLimit);
@@ -1571,12 +1381,16 @@ else
               break;
             }
           case 'i': {
-             //IMPORTANT
-             //Color sensor count be changed!
+              // IMPORTANT: Color sensor count can be changed!
               byteActiveColorSensor = 0;
               
-              for (int f = 0; f < 5; f++) {
+              // Pin mappings for analog and digital sensors
+              const int analogPins[SENSOR_COUNT] = {A1, A2, A3, A4, A5};
+              const int digitalPins[SENSOR_COUNT] = {DIGITAL_PIN_1, DIGITAL_PIN_2, DIGITAL_PIN_3, DIGITAL_PIN_4, DIGITAL_PIN_5};
+              
+              for (int f = 0; f < SENSOR_COUNT; f++) {
                 delete sensors[f];
+                
                 switch (bytearrayData[f]) {
                   case SENSOR_TYPE_NONE:
                   case SENSOR_TYPE_LINE:
@@ -1584,78 +1398,15 @@ else
                   case SENSOR_TYPE_LIGHT:
                   case SENSOR_TYPE_TOUCH:
                   case SENSOR_TYPE_PROXIMITY: {
-                      switch (f) {
-                        case 0: {
-                            sensors[f]  = new AnalogSensor(A1, bytearrayData[f]);
-                            break;
-                          }
-                        case 1: {
-                            sensors[f]  = new AnalogSensor(A2, bytearrayData[f]);
-                            break;
-                          }
-                        case 2: {
-                            sensors[f]  = new AnalogSensor(A3, bytearrayData[f]);
-                            break;
-                          }
-                        case 3: {
-                            sensors[f]  = new AnalogSensor(A4, bytearrayData[f]);
-                            break;
-                          }
-                        case 4: {
-                            sensors[f]  = new AnalogSensor(A5, bytearrayData[f]);
-                            break;
-                          }
-                      }
+                      sensors[f] = new AnalogSensor(analogPins[f], bytearrayData[f]);
                       break;
                     }
                   case SENSOR_TYPE_ULTRASONIC: {
-                      switch (f) {
-                        case 0: {
-                            sensors[f]  = new SonicSensor(DIGITAL_PIN_1);
-                            break;
-                          }
-                        case 1: {
-                            sensors[f]  = new SonicSensor(DIGITAL_PIN_2);
-                            break;
-                          }
-                        case 2: {
-                            sensors[f]  = new SonicSensor(DIGITAL_PIN_3);
-                            break;
-                          }
-                        case 3: {
-                            sensors[f]  = new SonicSensor(DIGITAL_PIN_4);
-                            break;
-                          }
-                        case 4: {
-                            sensors[f]  = new SonicSensor(DIGITAL_PIN_5);
-                            break;
-                          }
-                      }
+                      sensors[f] = new SonicSensor(digitalPins[f]);
                       break;
                     }
                   case SENSOR_TYPE_COLOR: {
-                      switch (f) {
-                        case 0: {
-                            sensors[f]  = new ColorSensor(DIGITAL_PIN_1);
-                            break;
-                          }
-                        case 1: {
-                            sensors[f]  = new ColorSensor(DIGITAL_PIN_2);
-                            break;
-                          }
-                        case 2: {
-                            sensors[f]  = new ColorSensor(DIGITAL_PIN_3);
-                            break;
-                          }
-                        case 3: {
-                            sensors[f]  = new ColorSensor(DIGITAL_PIN_4);
-                            break;
-                          }
-                        case 4: {
-                            sensors[f]  = new ColorSensor(DIGITAL_PIN_5);
-                            break;
-                          }
-                      }
+                      sensors[f] = new ColorSensor(digitalPins[f]);
                       break;
                     }
                 }
@@ -1690,32 +1441,18 @@ else
 
 
 #ifdef TESTMODE_COLOR_SENSOR
-   pinMode(11, OUTPUT);
-   if(fuck){
-      digitalHigh(11);
-      fuck = false;
-   }
-   else{
-      digitalLow(11);
-      fuck = true;
-   }
+  pinMode(11, OUTPUT);
+  if(testModeToggle){
+    digitalHigh(11);
+    testModeToggle = false;
+  }
+  else{
+    digitalLow(11);
+    testModeToggle = true;
+  }
 #endif
-  //   for(int f = 0; f < 5; f++){
-  //      sensors[f] -> iteration();
-  //   }
 
-  // Плавное обновление PWM моторов (мягкий старт/торможение)
+  // Smooth PWM update for motors (soft start/braking)
   leftMotor.updatePwm();
   rightMotor.updatePwm();
-
-
-  //   pinMode(11, OUTPUT);
-  //   if(fuck){
-  //      digitalHigh(11);
-  //      fuck = false;
-  //   }
-  //   else{
-  //      digitalLow(11);
-  //      fuck = true;
-  //   }
 }
