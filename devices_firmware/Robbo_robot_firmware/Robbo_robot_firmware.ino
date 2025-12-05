@@ -1,4 +1,4 @@
-#define FIRMWARE_VERSION "00009"
+#define FIRMWARE_VERSION "00010"
 //toDO PIDpath обнулить при перполнении на обоих моторах
 
 #include <EEPROM.h>
@@ -236,16 +236,8 @@ void onLeftMotorStep() {
   if ((leftMotor.stepsLimit > 0) && (leftMotor.stepsCnt >= leftMotor.stepsLimit)) {
     leftMotor.stepsLimit = 0;
     leftMotor.stop();
-    if(flag==0)
-    {
-      rightMotor.setSpeedAndDirection(15,globalRightDir);
-    }
-    else 
-    {
       rightMotor.stepsLimit = 0;
       rightMotor.stop();
-    }
-    flag=2;
   }
 }
 
@@ -254,16 +246,9 @@ void onRightMotorStep() {
   if ((rightMotor.stepsLimit > 0) && ( rightMotor.stepsCnt >= rightMotor.stepsLimit)) {
     rightMotor.stepsLimit = 0;
     rightMotor.stop();
-    if(flag==0)
-    {
-    leftMotor.setSpeedAndDirection(15,globalLeftDir);
-    }
-    else
-    {
       leftMotor.stepsLimit = 0;
       leftMotor.stop();
-    }
-    flag=2;
+
   }
 
 }
@@ -607,8 +592,8 @@ class ColorSensor: public ISensor {
     ColorSensor(int pin) {
       this -> pin = pin;
       pinAsInput(pin);
-      INTERVAL_BIT  = 114;
-      INTERVAL_BYTE = 912;
+      INTERVAL_BIT  = 111;
+      INTERVAL_BYTE = 111*8;
     };
     void  debugSetValue(byte value){
 
@@ -689,7 +674,7 @@ void reset() {
           }
         case 3: {
           INTERVAL_BIT_NEW=round((timeLowEnd-timeLowStart)/14);//mb +114*2/16
-          timeSync=timeLowEnd+INTERVAL_BIT+20;
+          timeSync=timeLowEnd+INTERVAL_BIT+50;
    //       Serial.println(INTERVAL_BIT);
           iSynchronized = 4;
           }
@@ -894,8 +879,8 @@ void setup() {
 
 
 }
-float last_input=0;
-float kli = 5;//5
+//float last_input=0;
+/*float kli = 5;//5
 float kii=  0.995;//0.5
 float diff=5;
 void update_power_using_PID(byte leftSpeed, byte rightSpeed,float input ){
@@ -924,7 +909,7 @@ void update_power_using_PID(byte leftSpeed, byte rightSpeed,float input ){
         last_input=last_input*kii+input;//0.5
        else
        last_input=0;
-}
+}*/
 
 
 void printSensors() {
@@ -1157,14 +1142,14 @@ void loop() {
     leftMotor.stop();
     rightMotor.stop();
   }
-    float e = 0; //невязка
+  /*  float e = 0; //невязка
     unsigned int stepsPathDelta = 0;
     if (leftMotor.PIDpath > (unsigned int)((float)rightMotor.PIDpath)*speed_proportion ){
        stepsPathDelta = leftMotor.PIDpath - (unsigned int)((float)rightMotor.PIDpath)*speed_proportion;
     }else{
            stepsPathDelta = (unsigned int)((float)rightMotor.PIDpath)*speed_proportion -  leftMotor.PIDpath;
     }
-  if (/* ( stepsPathDelta >1 ) && */(leftMotor.stepsPath > 0) && (rightMotor.stepsPath > 0) && (globalLeftMotorSpeed > 0) && (globalRightMotorSpeed > 0)&&(flag==0) )
+  if (/* ( stepsPathDelta >1 ) && *//*(leftMotor.stepsPath > 0) && (rightMotor.stepsPath > 0) && (globalLeftMotorSpeed > 0) && (globalRightMotorSpeed > 0)&&(flag==0) )
   {          
        // steps_proportion =  steps_proportion.div(Fixed::fromInt(leftMotor.stepsPath),Fixed::fromInt(rightMotor.stepsPath));
            //   e = steps_proportion - speed_proportion; //вычисляем невязку
@@ -1179,7 +1164,7 @@ else
   leftMotor.stop();
   rightMotor.stop();
 }
-}
+}*/
 
   if (Serial.available()) {
 
@@ -1389,18 +1374,18 @@ else
                 rightDir = DIRECTION_BACKWARD;
                 rightSpeed -= 64;
               }
-               speed_proportion = ((float)leftSpeed / (float) rightSpeed) * calibraterdl / calibrateldr;
+              // speed_proportion = ((float)leftSpeed / (float) rightSpeed) * calibraterdl / calibrateldr;
                globalLeftMotorSpeed = leftSpeed;
                globalRightMotorSpeed = rightSpeed;
                globalLeftDir = leftDir;
                globalRightDir = rightDir;
-               leftMotor.PIDspeed=leftSpeed;
-               rightMotor.PIDspeed=rightSpeed;
-              if((leftSpeed==0)&&(rightSpeed==0))//проверка на обнуление ПИД путей
-              {
-              leftMotor.PIDpath=0;
-              rightMotor.PIDpath=0;
-              }
+             //  leftMotor.PIDspeed=leftSpeed;
+             //  rightMotor.PIDspeed=rightSpeed;
+             // if((leftSpeed==0)&&(rightSpeed==0))//проверка на обнуление ПИД путей
+             // {
+             // leftMotor.PIDpath=0;
+              //rightMotor.PIDpath=0;
+              //}
               leftMotor.setSpeedAndDirection(leftSpeed, leftDir);///
               rightMotor.setSpeedAndDirection(rightSpeed, rightDir);//
               printSensors();
@@ -1459,8 +1444,8 @@ else
               byte leftDir = DIRECTION_FORWARD;
               byte rightDir = DIRECTION_FORWARD;
               flag=0;
-              leftMotor.PIDpath=0;
-              rightMotor.PIDpath=0;
+            //  leftMotor.PIDpath=0;
+             // rightMotor.PIDpath=0;
               if ( leftSpeed >= 64) {
                 leftDir = DIRECTION_BACKWARD;
                 leftSpeed -= 64;
@@ -1471,20 +1456,20 @@ else
               }
               //if(leftSpeed!=rightSpeed)
               
-              if(leftSpeed==rightSpeed)
-              kii=0.92 -(63-leftSpeed)*0.02;
-              else
-              {kii=1;flag=1;}
+             // if(leftSpeed==rightSpeed)
+            //  kii=0.92 -(63-leftSpeed)*0.02;
+             // else
+            //  {kii=1;flag=1;}
               unsigned int iStepsLimit = stepsHigh;
               iStepsLimit = iStepsLimit << 8;
               iStepsLimit += stepsLow;
-              speed_proportion = (float)leftSpeed / (float) rightSpeed*calibraterdl/calibrateldr;//соотношение скоростей и путей соответственно
+             // speed_proportion = (float)leftSpeed / (float) rightSpeed*calibraterdl/calibrateldr;//соотношение скоростей и путей соответственно
               globalLeftDir = leftDir;
               globalRightDir = rightDir;
               globalLeftMotorSpeed=leftSpeed;
               globalRightMotorSpeed=rightSpeed;
-              leftMotor.PIDspeed=leftSpeed;
-              rightMotor.PIDspeed=rightSpeed;
+             // leftMotor.PIDspeed=leftSpeed;
+             // rightMotor.PIDspeed=rightSpeed;
               leftMotor.setSpeedAndDirection(leftSpeed, leftDir);
               rightMotor.setSpeedAndDirection(rightSpeed, rightDir);
               leftMotor.enableAndSetStepsLimit(iStepsLimit);
