@@ -83,6 +83,8 @@ const byte MOTOR_STATE_STEPS_LIMIT = 2;
 const byte DIRECTION_FORWARD = 0;
 const byte DIRECTION_BACKWARD = 1;
 
+const unsigned long ACCELERATION_INTERVAL_MILLISECONDS = 10;  // интервал между изменениями скорости, мс
+
 struct Motor {
   public:
     byte direction;
@@ -211,9 +213,7 @@ struct Motor {
     // Плавное изменение currentSpeed к maxSpeed и обновление выходов
     void updatePwm() {
       unsigned long now = millis();
-
-      const unsigned long accelIntervalMs = 10;  // интервал между изменениями скорости, мс
-      if (now - lastPwmUpdateMs < accelIntervalMs) {
+      if (now - lastPwmUpdateMs < ACCELERATION_INTERVAL_MILLISECONDS) {
         return;
       }
       lastPwmUpdateMs = now;
