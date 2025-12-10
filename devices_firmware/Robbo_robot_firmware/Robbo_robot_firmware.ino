@@ -370,6 +370,18 @@ void parseSerialNumber() {
   }
 }
 
+// Read exact number of bytes from Serial with timeout (non-blocking spin).
+bool readBytesWithTimeout(char *buf, size_t len, unsigned long timeoutMs) {
+  unsigned long start = millis();
+  size_t idx = 0;
+  while (idx < len && (millis() - start) < timeoutMs) {
+    if (Serial.available()) {
+      buf[idx++] = Serial.read();
+    }
+  }
+  return idx == len;
+}
+
 byte byteActiveColorSensor = 0;
 
 class ISensor {
@@ -757,30 +769,26 @@ void setup() {
   m_lastResult = 0;
 
   EEPROM.get(BLUE_CHECK, blue_num);
-  if (!blue_num) {
-    Serial.write("$$$");
-    delay(100);
-    char a[3];
-    a[0] = Serial.read();
-    a[1] = Serial.read();
-    a[2] = Serial.read();
-    a[2] = Serial.read();
-    delay(1000);
-    if (a[0] == 'C') {
+  if (blue_num != '1') {
+    const unsigned long BT_CMD_DELAY_MS = 100;
+    const unsigned long BT_RESPONSE_TIMEOUT_MS = 1000;
+    Serial.write("$$$"); // enter command mode
+    delay(BT_CMD_DELAY_MS);
+
+    char resp[3] = {};
+    bool ok = readBytesWithTimeout(resp, 3, BT_RESPONSE_TIMEOUT_MS);
+    if (ok && resp[0] == 'C') {
       Serial.println("SQ,16");
-      delay(100);
-      a[0] = Serial.read();
-      a[1] = Serial.read();
-      a[2] = Serial.read();
-      a[2] = Serial.read();
-      delay(100);
-      if (a[1] == 'A') {
+      delay(BT_CMD_DELAY_MS);
+
+      ok = readBytesWithTimeout(resp, 3, BT_RESPONSE_TIMEOUT_MS);
+      if (ok && resp[1] == 'A') {
         digitalWrite(10, HIGH);
         delay(100);
         digitalWrite(10, LOW);
         EEPROM.put(BLUE_CHECK,
                    '1'); //   <----------------------------- У EEPROM
-                         //   ограничеено количество циклов записи, сначала
+                         //   ограничено количество циклов записи, сначала
                          //   думай, потом раскомменчивай!
         Serial.println("---");
       } else {
@@ -788,6 +796,10 @@ void setup() {
         delay(2000);
         digitalWrite(9, LOW);
       }
+    } else {
+      digitalWrite(9, HIGH);
+      delay(2000);
+      digitalWrite(9, LOW);
     }
   }
 
