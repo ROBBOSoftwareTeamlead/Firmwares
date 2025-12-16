@@ -4,7 +4,7 @@
 #include <EEPROM.h>
 #include <Servo.h>
 
-// #define SERIAL_SPEED 115200
+//#define SERIAL_SPEED 115200
 #define SERIAL_SPEED 38400
 #define SERIAL_ADDRESS 0
 #define data 2
@@ -261,6 +261,8 @@ void setup() {
   parseSerialNumber();
   sensor.begin();
   Serial.begin(SERIAL_SPEED);
+  // Даём CH340/драйверу время корректно поднять линию после ресета
+  delay(200);
   EEPROM.get(0, chararrSerialRaw);
   // Serial.print("robot id is: ");
   // Serial.println(chararrSerialRaw);
@@ -295,7 +297,65 @@ byte command = 0;
 byte diod = 1;
 byte zz = 0;
 byte turn_speed = 0;
+bool identificationSent = false;
+unsigned long identStartMs = 0;
+const unsigned long IDENT_SPAM_WINDOW_MS = 3000;
+const unsigned long IDENT_SPAM_PERIOD_MS = 300;
+
+void sendIdentification() {
+  Serial.print(F("ROBBO-"));
+  if (MODEL_ID < 10000) {
+    Serial.write('0');
+  }
+  if (MODEL_ID < 1000) {
+    Serial.write('0');
+  }
+  if (MODEL_ID < 100) {
+    Serial.write('0');
+  }
+  if (MODEL_ID < 10) {
+    Serial.write('0');
+  }
+  Serial.print(MODEL_ID);
+  Serial.write('-');
+  Serial.print(F(FIRMWARE_VERSION));
+  Serial.write('-');
+  Serial.print(chararrModel);
+  Serial.print('-');
+  for (int f = strlen(chararrVersion); f < 5; f++) {
+    Serial.write('0');
+  }
+  Serial.print(chararrVersion);
+  Serial.print('-');
+  for (int f = strlen(chararrPart); f < 5; f++) {
+    Serial.write('0');
+  }
+  Serial.print(chararrPart);
+  Serial.print('-');
+  for (int f = strlen(chararrSerial); f < 20; f++) {
+    Serial.write('0');
+  }
+  Serial.print(chararrSerial);
+}
 void loop() {
+  unsigned long nowMs = millis();
+
+  // Небольшая пауза после старта перед первой идентификацией,
+  // чтобы загрузчик/драйвер успели «отпустить» порт.
+  if (!identificationSent) {
+    if (nowMs > 300) { // не шлём в самые первые 300 мс
+      sendIdentification();
+      identStartMs = nowMs;
+      identificationSent = true;
+    }
+  } else if (nowMs - identStartMs < IDENT_SPAM_WINDOW_MS) {
+    // В течение окна спамим идентификацию, чтобы хост наверняка поймал хотя бы один пакет.
+    static unsigned long lastIdentMs = 0;
+    if (nowMs - lastIdentMs >= IDENT_SPAM_PERIOD_MS) {
+      sendIdentification();
+      lastIdentMs = nowMs;
+    }
+  }
   for (zz = 0; zz < 6; zz++) {
     if ((need_pos[zz] != pos[zz]) && (millis() > times[zz])) {
       if (need_pos[zz] > pos[zz])
@@ -350,40 +410,7 @@ void loop() {
     if (commandState == COMMAND_STATE_WAITING_COMMAND) {
       switch (b) {
       case ' ': {
-        Serial.print(F("ROBBO-"));
-        if (MODEL_ID < 10000) {
-          Serial.write('0');
-        }
-        if (MODEL_ID < 1000) {
-          Serial.write('0');
-        }
-        if (MODEL_ID < 100) {
-          Serial.write('0');
-        }
-        if (MODEL_ID < 10) {
-          Serial.write('0');
-        }
-        Serial.print(MODEL_ID);
-        Serial.write('-');
-        Serial.print(F(FIRMWARE_VERSION));
-        Serial.write('-');
-        Serial.print(chararrModel);
-        Serial.print('-');
-        for (int f = strlen(chararrVersion); f < 5; f++) {
-          Serial.write('0');
-        }
-        Serial.print(chararrVersion);
-        Serial.print('-');
-        for (int f = strlen(chararrPart); f < 5; f++) {
-          Serial.write('0');
-        }
-        Serial.print(chararrPart);
-        Serial.print('-');
-        for (int f = strlen(chararrSerial); f < 20; f++) {
-          Serial.write('0');
-        }
-        Serial.print(chararrSerial);
-
+        sendIdentification();
         break;
       }
       case 'a': {
