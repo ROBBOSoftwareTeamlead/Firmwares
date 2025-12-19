@@ -4,8 +4,7 @@
 #include <EEPROM.h>
 #include <Servo.h>
 
-//#define SERIAL_SPEED 115200
-#define SERIAL_SPEED 38400
+#define SERIAL_SPEED 57600
 #define SERIAL_ADDRESS 0
 #define data 2
 #define clock 4
