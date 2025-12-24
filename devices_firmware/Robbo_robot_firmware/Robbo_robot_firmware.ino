@@ -2,7 +2,7 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 
-#define FIRMWARE_VERSION "00010"
+#define FIRMWARE_VERSION "00011"
 
 #define SERIAL_SPEED 115200
 #define SERIAL_ADDRESS 0
