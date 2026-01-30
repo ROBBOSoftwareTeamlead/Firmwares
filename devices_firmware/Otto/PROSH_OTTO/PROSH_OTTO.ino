@@ -1,4 +1,4 @@
-#define FIRMWARE_VERSION "00002"
+#define FIRMWARE_VERSION "00003"
 #include "Arduino.h"
 #include "HC_SR04.h"
 #include <EEPROM.h>
