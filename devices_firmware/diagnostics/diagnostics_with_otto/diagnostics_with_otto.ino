@@ -1,8 +1,15 @@
+/*
+ * Diagnostic firmware for Nano / Robot / Lab / OTTO (Nulllab).
+ * Reads MODEL_ID from serial number in EEPROM; outputs "ROBBO-XXXXX." (5 digits).
+ * Serial: 115200 baud. Host (RobboScratch flasher) switches to 115200 after flashing
+ * and waits for this string; used as firmwares["diagnostics"] when flashing at 57600
+ * (candidate nano/otto_nulllab in DIAGNOSTIC_CANDIDATES).
+ */
 #include <EEPROM.h>
 
 #define SERIAL_SPEED 115200
 #define SERIAL_ADDRESS 0
-
+#define SERIAL_RAW_MAX 49
 
 char chararrSerialRaw[50];
 char chararrModel[21];
@@ -15,48 +22,52 @@ int MODEL_ID;
 
 void parseSerialNumber(){
     EEPROM.get(SERIAL_ADDRESS, chararrSerialRaw);
-
+    chararrSerialRaw[SERIAL_RAW_MAX] = '\0';
 
     int iPointer = 0;
-    while(chararrSerialRaw[iPointer] != '-'){
+    while (iPointer <= SERIAL_RAW_MAX && chararrSerialRaw[iPointer] != '-' && chararrSerialRaw[iPointer] != '\0') {
       iPointer++;
     }
+    if (iPointer > SERIAL_RAW_MAX) { MODEL_ID = 9999; return; }
     iPointer++;
 
     int iModelOffset = 0;
-    while(chararrSerialRaw[iPointer] != '-'){
+    while (iPointer <= SERIAL_RAW_MAX && chararrSerialRaw[iPointer] != '-' && chararrSerialRaw[iPointer] != '\0' && iModelOffset < 20) {
       chararrModel[iModelOffset] = chararrSerialRaw[iPointer];
       iModelOffset++;
       iPointer++;
     }
+    chararrModel[iModelOffset] = '\0';
+    if (iPointer > SERIAL_RAW_MAX) { MODEL_ID = 9999; return; }
     iPointer++;
 
     int iVersionOffset = 0;
-    while(chararrSerialRaw[iPointer] != '-'){
+    while (iPointer <= SERIAL_RAW_MAX && chararrSerialRaw[iPointer] != '-' && chararrSerialRaw[iPointer] != '\0' && iVersionOffset < 20) {
       chararrVersion[iVersionOffset] = chararrSerialRaw[iPointer];
       iVersionOffset++;
       iPointer++;
     }
-
+    chararrVersion[iVersionOffset] = '\0';
+    if (iPointer > SERIAL_RAW_MAX) { MODEL_ID = 9999; return; }
     iPointer++;
 
     int iPartOffset = 0;
-    while(chararrSerialRaw[iPointer] != '-'){
+    while (iPointer <= SERIAL_RAW_MAX && chararrSerialRaw[iPointer] != '-' && chararrSerialRaw[iPointer] != '\0' && iPartOffset < 20) {
       chararrPart[iPartOffset] = chararrSerialRaw[iPointer];
       iPartOffset++;
       iPointer++;
     }
-
+    chararrPart[iPartOffset] = '\0';
+    if (iPointer > SERIAL_RAW_MAX) { MODEL_ID = 9999; return; }
     iPointer++;
 
-
     int iSerialOffset = 0;
-    while(chararrSerialRaw[iPointer] != 0){
+    while (iPointer <= SERIAL_RAW_MAX && chararrSerialRaw[iPointer] != '\0' && iSerialOffset < 20) {
       chararrSerial[iSerialOffset] = chararrSerialRaw[iPointer];
       iSerialOffset++;
       iPointer++;
     }
-
+    chararrSerial[iSerialOffset] = '\0';
 
     if(strcmp(chararrModel, "R") == 0
        && strcmp(chararrVersion, "1") == 0
@@ -117,9 +128,14 @@ void loop(){
       Serial.write('0');
       }
       Serial.print(MODEL_ID);
-
       Serial.write('.');
 
-      delay(1000);
+      static int loopCount = 0;
+      if (loopCount < 5) {
+        delay(100);
+        loopCount++;
+      } else {
+        delay(1000);
+      }
 }
 
