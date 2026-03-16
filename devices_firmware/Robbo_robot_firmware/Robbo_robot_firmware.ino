@@ -210,7 +210,10 @@ public:
     lastPwmUpdateMs = now;
 
     if (currentSpeed == maxSpeed) {
-      return; // уже достигли целевой скорости
+      // Всегда обновляем выходы: при смене направления без смены скорости
+      // (например вперёд 6 → назад 6) без applyPwm() пины не переключаются.
+      applyPwm();
+      return;
     }
 
     const byte accelStep = 1; // максимально изменяем скорость за шаг
