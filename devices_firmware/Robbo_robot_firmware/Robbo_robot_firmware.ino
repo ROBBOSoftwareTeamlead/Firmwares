@@ -1,4 +1,4 @@
-#include "ServoTimer2.h"
+#include "servotimer2.h"
 #include <Arduino.h>
 #include <EEPROM.h>
 

@@ -33,7 +33,7 @@ inline void digitalWrite(int, int) {}
 inline unsigned long micros() { return 0; }
 #endif
 
-#include "ServoTimer2.h"
+#include "servotimer2.h"
 
 static void initISR();
 static void writeChan(uint8_t chan, int pulsewidth);
