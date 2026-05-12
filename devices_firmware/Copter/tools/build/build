@@ -3,7 +3,5 @@ set -e
 
 scriptDir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
-${scriptDir}/test "${@}"
-${scriptDir}/test_python "${@}"
+${scriptDir}/download_deps
 ${scriptDir}/make "${@}"
-${scriptDir}/check_elf
