@@ -4,27 +4,37 @@
 HC_SR04 *HC_SR04::_instance(NULL);
 
 HC_SR04::HC_SR04(int trigger, int echo, int interrupt, int max_dist)
-    : _trigger(trigger), _echo(echo), _int(interrupt), _max(max_dist), _finished(false)
+    : _trigger(trigger), _echo(echo), _int(interrupt), _max(max_dist),
+      _start(0), _end(0), _finished(false), _gotRise(false), _startMs(0)
 {
-  if(_instance==0) _instance=this;    
+  if(_instance==0) _instance=this;
 }
 
 void HC_SR04::begin(){
   pinMode(_trigger, OUTPUT);
   digitalWrite(_trigger, LOW);
-  pinMode(_echo, INPUT);  
+  pinMode(_echo, INPUT);
   attachInterrupt(_int, _echo_isr, CHANGE);
 }
 
 void HC_SR04::start(){
+  noInterrupts();
   _finished=false;
+  _gotRise=false;
+  interrupts();
+  _startMs=millis();
   digitalWrite(_trigger, HIGH);
   delayMicroseconds(10);
-  digitalWrite(_trigger, LOW);  
+  digitalWrite(_trigger, LOW);
 }
 
 unsigned int HC_SR04::getRange(bool units){
-  int a=(_end-_start)/58;
+  // unsigned long на 8-битном AVR читается не атомарно — копируем под запретом прерываний
+  noInterrupts();
+  unsigned long start=_start;
+  unsigned long end=_end;
+  interrupts();
+  unsigned long a=(end-start)/58;
   if(a>255)
   return 255;
   return a;
@@ -32,14 +42,17 @@ unsigned int HC_SR04::getRange(bool units){
 
 void HC_SR04::_echo_isr(){
   HC_SR04* _this=HC_SR04::instance();
-  
+
   switch(digitalRead(_this->_echo)){
     case HIGH:
       _this->_start=micros();
+      _this->_gotRise=true;
       break;
     case LOW:
+      // Спад без фронта в этом замере — хвост прошлого эха или помеха от моторов
+      if(!_this->_gotRise) break;
       _this->_end=micros();
       _this->_finished=true;
       break;
-  }   
+  }
 }

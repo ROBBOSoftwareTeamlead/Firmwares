@@ -1,4 +1,4 @@
-#define FIRMWARE_VERSION "00003"
+#define FIRMWARE_VERSION "00004"
 #include "Arduino.h"
 #include "HC_SR04.h"
 #include <EEPROM.h>
@@ -217,14 +217,46 @@ void parseSerialNumber() {
 }
 ///////////////////////////////////////////////////////ENDSERIALNUMBER
 ///////////////////////////////////////////////////////ULTRASONIC
+// Эхо HC-SR04 без препятствия длится ~38 мс; дольше — спад ECHO потерян
+// (просадка питания от сервоприводов, сброс датчика посреди замера)
+#define SONIC_TIMEOUT_MS 60
+// Нет ни одного достоверного замера столько мс — отдаём 255 («нет данных»), а не старое значение
+#define SONIC_STALE_MS 300
+// Ближе 2 см HC-SR04 не меряет: 0 и 1 — помеха
+#define SONIC_MIN_CM 2
+
 int dist = 0;
+unsigned char sonicLast[3] = {0, 0, 0};
+unsigned char sonicCount = 0;
+unsigned long sonicValidMs = 0;
 HC_SR04 sensor(PIN_SONIC_TRIG, PIN_SONIC_ECHO, ECHO_INT);
+
+unsigned char median3(unsigned char a, unsigned char b, unsigned char c) {
+  if (a > b) { unsigned char t = a; a = b; b = t; }
+  if (b > c) { b = c; }
+  return a > b ? a : b;
+}
+
 int getDist() {
   if (sensor.isFinished()) {
-    // Do something with the range...
-    dist = sensor.getRange();
-    // Serial.println("cm");
+    unsigned int range = sensor.getRange();
+    if (range >= SONIC_MIN_CM) {
+      sonicLast[0] = sonicLast[1];
+      sonicLast[1] = sonicLast[2];
+      sonicLast[2] = range;
+      if (sonicCount < 3) sonicCount++;
+      // Медиана трёх замеров отсекает одиночные выбросы при работе моторов
+      dist = sonicCount < 3 ? range : median3(sonicLast[0], sonicLast[1], sonicLast[2]);
+      sonicValidMs = millis();
+    }
     sensor.start();
+  } else if (sensor.elapsedMs() > SONIC_TIMEOUT_MS) {
+    // Без перезапуска замер ждал бы спада ECHO вечно, и dist застывал до перезагрузки
+    sensor.start();
+  }
+  if (millis() - sonicValidMs > SONIC_STALE_MS) {
+    dist = 255;
+    sonicCount = 0;
   }
   return dist;
 }
